@@ -1,0 +1,94 @@
+name: CI/CD для Telegram бота
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Установка Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Кэширование зависимостей pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Установка зависимостей
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        pip install -r requirements.txt
+        
+    - name: Линтинг с flake8
+      run: |
+        # остановка сборки при наличии синтаксических ошибок Python
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # проверка с предупреждениями (не останавливает сборку)
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Настройка SSH
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        
+    - name: Добавление хоста в known_hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Копирование файлов на сервер
+      run: |
+        rsync -avz --exclude '.git' \
+                  --exclude '.github' \
+                  --exclude '.gitignore' \
+                  --exclude 'README.md' \
+                  ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/tg-bot/
+    
+    - name: Установка зависимостей и запуск бота
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          cd ~/tg-bot
+          
+          # Остановка процесса бота, если запущен
+          if pgrep -f "python main.py" > /dev/null; then
+            pkill -f "python main.py"
+          fi
+          
+          # Создание и активация виртуального окружения
+          if [ ! -d "venv" ]; then
+            python3 -m venv venv
+          fi
+          source venv/bin/activate
+          
+          # Установка зависимостей
+          pip install -r requirements.txt
+          
+          # Запуск бота в фоновом режиме
+          nohup python main.py > bot.log 2>&1 &
+          
+          echo "Телеграм бот запущен" 
